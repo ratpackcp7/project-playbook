@@ -20,4 +20,4 @@
 | 006 | Relay Command | `[✓]` | 002 | Assemble prompt from project files, print to stdout |
 | 007 | Smoke Test + README | `[✓]` | 006 | End-to-end bash test, project documentation |
 | 008 | Review-Spec Command | `[✓]` | 007 | OpenRouter multi-model adversarial review |
-| 009 | Review-Spec Tests + Live Verify | `[ ]` | 008 | Tests + real DeepSeek call |
+| 009 | Review-Spec Tests + Live Verify | `[✓]` | 008 | Tests + real DeepSeek call |
