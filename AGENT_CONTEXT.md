@@ -44,6 +44,18 @@ At the end of every task, output:
 COMPLETE | BLOCKED (reason)
 ```
 
+## Report File
+
+After completing every task, write your full output report to `.playbook-report.md` in the project root. This ensures your output is recoverable even if the relay times out. Use the same format as the Output Format section above.
+
+## Auto-Commit
+
+After completing a task and writing your report:
+1. `git add -A`
+2. `git commit -m "task NNN: short description from task objective"`
+
+Do NOT push. The dispatcher will push after verification.
+
 ## What NOT to Do
 
 - Do not modify files outside the project directory

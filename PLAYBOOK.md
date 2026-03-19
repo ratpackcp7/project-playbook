@@ -33,6 +33,7 @@ When in doubt: if you can describe the entire task in 3 sentences and there's on
 - [ ] External dependencies — third-party services, APIs, packages with versions
 - [ ] Environment — env vars, secrets, ports, config files
 - [ ] Constraints — what the agent can't do (permissions, network, etc.)
+- [ ] Project repo initialized — spec, tasks, and code all live in the same repo
 
 **Rules:**
 
@@ -84,6 +85,11 @@ If you encounter a conflict, ambiguity, or something that seems wrong:
 3. Do not improvise alternatives unless the spec is impossible to follow
 
 When done, list every file you created or modified.
+
+When you have completed the task:
+1. Write your report to .playbook-report.md in the project root
+2. git add -A && git commit -m "task NNN: objective"
+3. Do NOT push
 ```
 
 **Execution rules:**

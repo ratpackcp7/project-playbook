@@ -30,6 +30,7 @@ A template repository for planning, specifying, and executing software projects 
 - **Strict spec, flagged concerns.** The agent follows the spec exactly but reports conflicts or ambiguities.
 - **Verify before advancing.** Every task goes through a review gate before the next one starts.
 - **Context lives in files.** The agent reads the spec from disk — no token-heavy prompt stuffing.
+- **Spec and tasks live alongside code** in the project repo, not in the template.
 
 ## Requirements
 
