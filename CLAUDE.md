@@ -42,3 +42,7 @@ The `playbook init` command (from `playbook-cli`) copies this template, replaces
 ## Rules
 - This repo is read-only for agents — do not modify the template without discussing with Chris
 - One commit per task
+
+## Active Work
+
+See `HANDOFF.md` for current work status and next steps.
