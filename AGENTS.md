@@ -1,19 +1,47 @@
-# CLAUDE.md — Project Playbook
+# AGENTS.md — Project Playbook
 
-Template repository for planning and executing software projects using a human-architect + AI-agent workflow. Defines the spec → task → build → verify methodology.
+## Purpose
 
-## Before You Start
-- Read `SPEC.md` for the full playbook methodology and conventions
-- Read `AGENT_CONTEXT.md` for coding conventions the agent should follow
+Template repository for planning and executing software projects using a human-architect + AI-agent workflow.
+
+Defines the spec → task → build → verify methodology used across cp7 projects. The `playbook-cli` tool consumes this template to scaffold new projects with the standard file structure and conventions.
 
 ## Key Facts
+
 - This is a **TEMPLATE repo** — not a running service, no port, no deployment
 - Defines the spec → task → build → verify workflow used across cp7 projects
 - Used by `playbook-cli` to scaffold new projects
+- This repo is read-only for agents — do not modify the template without discussing with Chris
+- One commit per task
 
-## What the template generates
+## Architecture
 
-Directory structure for a new project:
+```
+project-playbook/
+├── SPEC.md          # Full feature specification methodology
+├── TASKS.md         # Task list with status tracking
+├── PLAYBOOK.md      # Workflow rules and conventions (phases, gates, failure protocol)
+├── AGENT_CONTEXT.md # What the AI agent needs to know (constraints, conventions, output format)
+├── AGENTS.md        # This file — project orientation for agents
+├── HANDOFF.md       # Current work status and next steps
+├── README.md        # Human-facing project overview
+├── tasks/           # Individual task files (T001.md, T002.md, ...)
+│   ├── _TEMPLATE.md # Copy this for each new task
+│   └── 001-example.md
+├── reviews/         # Review outputs
+├── docs/
+│   └── decisions/   # ADR directory (ADR-template.md, README.md)
+└── src/             # Source code (empty initially, populated by playbook-cli)
+```
+
+Key files:
+- `SPEC.md` — Defines the architecture, data models, API contracts, file tree for new projects
+- `PLAYBOOK.md` — The process: Phase 1 (Architecture), Phase 2 (Task Breakdown), Phase 3 (Execute), Phase 4 (Verify), plus Failure Protocol
+- `AGENT_CONTEXT.md` — Constraints (no sudo, Docker socket proxy, writable paths), conventions (Python 3.12+, venv, formatting), output format
+- `tasks/_TEMPLATE.md` — Template for creating new task files
+- `TASKS.md` — Tracks task queue with status indicators (`[ ]`, `[>]`, `[✓]`, `[!]`, `[~]`)
+
+What the template generates for new projects:
 ```
 project-name/
 ├── SPEC.md          # Full feature specification
@@ -21,14 +49,34 @@ project-name/
 ├── PLAYBOOK.md      # Workflow rules and conventions
 ├── AGENT_CONTEXT.md # What the AI agent needs to know
 ├── AGENTS.md        # File inventory for agent reference
-├── tasks/           # Individual task files (T001.md, T002.md, ...)
+├── tasks/           # Individual task files
 ├── reviews/         # Review outputs
 └── src/             # Source code (empty initially)
 ```
 
-## How `new-project.sh` uses it
+## Agents and Crons
 
-The `playbook init` command (from `playbook-cli`) copies this template, replaces placeholder names, and initializes the `tasks/` directory. The resulting project follows the methodology defined in `SPEC.md`.
+None.
+
+## Gotchas
+
+None.
+
+## Active Work
+
+See `HANDOFF.md` for current work status and next steps.
+
+## Decisions
+
+See `docs/decisions/`. No ADRs exist yet.
+
+## Before You Start
+- Read `SPEC.md` for the full playbook methodology and conventions
+- Read `AGENT_CONTEXT.md` for coding conventions the agent should follow
+
+## How `playbook-cli` uses this template
+
+The `playbook init` command copies this template, replaces placeholder names, and initializes the `tasks/` directory. The resulting project follows the methodology defined in `SPEC.md`.
 
 ## Workflow
 
@@ -38,14 +86,6 @@ The `playbook init` command (from `playbook-cli`) copies this template, replaces
 4. **Agent** executes tasks one at a time, updating status
 5. **Human** reviews completed work
 6. **Agent** runs `playbook verify` to confirm spec compliance
-
-## Rules
-- This repo is read-only for agents — do not modify the template without discussing with Chris
-- One commit per task
-
-## Active Work
-
-See `HANDOFF.md` for current work status and next steps.
 
 <!-- CP7-AGENT-STANDARDS:START -->
 
