@@ -24,6 +24,18 @@ A template repository for planning, specifying, and executing software projects 
     └── 001-example.md     # Post-task review notes
 ```
 
+## Reusable Repository Documentation Standard
+
+This repo also hosts the **CP7 Reusable Repository Documentation Standard** — a
+reusable, agent-agnostic standard for how any CP7 repo documents itself (canonical
+`AGENTS.md`, doc lifecycle, terminology, templates, and a read-only docs checker).
+
+- Standard: [`docs/standards/repository-documentation/STANDARD.md`](docs/standards/repository-documentation/STANDARD.md)
+- Tools: [`scripts/repo-doc-check`](scripts/repo-doc-check) (deterministic gate) and [`scripts/repo-doc-audit`](scripts/repo-doc-audit) (read-only audit)
+
+It governs *documentation structure only*; it references (does not restate) the
+Agent Control Plane runtime rules and this repo's own `PLAYBOOK.md` workflow.
+
 ## Key Principles
 
 - **Planning is the product.** The spec is written before any code. The agent executes, it doesn't design.

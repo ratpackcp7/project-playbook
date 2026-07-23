@@ -1,0 +1,430 @@
+#!/usr/bin/env python3
+"""repo-doc-check — deterministic, read-only repository documentation checks.
+
+Part of the CP7 Reusable Repository Documentation Standard
+(docs/standards/repository-documentation/). This tool NEVER writes to the
+repository and NEVER requires network access. It is safe to run in CI or
+locally. It reports OK/WARN/FAIL lines and a final `result: PASS` or
+`result: FAIL`, exiting 0 on PASS and 1 on FAIL.
+
+What it does NOT do: it does not resolve semantic conflicts, judge whether a
+document is stale, or decide source-of-truth disputes. Those require the
+read-only semantic audit (`repo-doc-audit`) plus agent/human review.
+
+Configuration is per-project via a JSON file (default `.repo-doc.json` at the
+repo root). Every key is optional; sensible defaults apply when the file is
+absent, so a small project needs no config at all. See
+`docs/standards/repository-documentation/AUDIT.md` for the full config schema.
+
+Zero third-party dependencies — standard library only.
+"""
+from __future__ import annotations
+
+import argparse
+import fnmatch
+import json
+import re
+import subprocess
+import sys
+from pathlib import Path
+
+# --------------------------------------------------------------------------- #
+# Defaults — a project with no .repo-doc.json still gets a useful baseline.
+# --------------------------------------------------------------------------- #
+DEFAULTS = {
+    # Files that must exist for the check to pass.
+    "required_files": ["README.md", "AGENTS.md"],
+    # The one canonical agent-instruction file every adapter must point at.
+    "canonical_agents_file": "AGENTS.md",
+    # Active-work tracker size budget. `required: false` means absence is OK
+    # (no active work == no HANDOFF), but if present it must fit the budget.
+    "handoff": {
+        "file": "HANDOFF.md",
+        "required": False,
+        "warn_lines": 200,
+        "fail_lines": 400,
+    },
+    # Documentation index. Optional by default; small repos may not need one.
+    "index": {
+        "file": "docs/INDEX.md",
+        "required": False,
+        "must_reference": [],
+    },
+    # SPEC lifecycle. Disabled unless the project uses specifications.
+    "specs": {
+        "enabled": False,
+        "active_dir": "docs/specs/active",
+        "completed_dir": "docs/specs/completed",
+        "archive_dir": "docs/specs/archive",
+        "status_scan_lines": 45,
+    },
+    # Thin harness adapters. Any that exist must reference the canonical file.
+    # Globs allowed. This list is a superset; missing ones are simply skipped.
+    "adapters": {
+        "candidates": [
+            ".cursor/rules/*.mdc",
+            "GEMINI.md",
+            "CLAUDE.md",
+            ".codex/AGENTS.md",
+            ".gemini/GEMINI.md",
+        ],
+        "require_at_least_one": False,
+    },
+    # Relative Markdown link / path-reference checking (in-repo scope only).
+    "link_check": {
+        "enabled": True,
+        "scan": ["AGENTS.md", "README.md", "docs/INDEX.md", "ROADMAP.md"],
+        "allowlist": [],
+    },
+    # Uncontrolled, ambiguous filenames the standard prohibits. Globs allowed,
+    # matched case-insensitively against the file's basename.
+    "forbidden_filenames": [
+        "FINAL_NOTES.md",
+        "LATEST_PLAN.md",
+        "NEW_HANDOFF.md",
+        "FINAL_*.md",
+        "*_FINAL.md",
+        "LATEST_*.md",
+        "NEW_*.md",
+        "*_NEW.md",
+        "*-old.md",
+        "*_old.md",
+        "*.md.bak",
+    ],
+    # Project-configured stale terms to flag if they appear in scanned docs.
+    "forbidden_terms": [],
+    # Directories never scanned for links or forbidden names.
+    "ignore_dirs": [
+        ".git", "node_modules", "venv", ".venv", "dist", "build",
+        "__pycache__", ".mypy_cache", ".pytest_cache", "vendor",
+    ],
+}
+
+MD_LINK = re.compile(r"(?<!!)\[[^\]]*\]\(([^)]+)\)")
+BACKTICK = re.compile(r"`([^`\n]+)`")
+FENCE = re.compile(r"```.*?```", re.DOTALL)
+PATH_PREFIXES = ("docs/", "scripts/", "src/", "tests/", ".github/", ".cursor/",
+                 ".claude/", ".codex/", "frontend/", "bin/")
+
+
+class Report:
+    def __init__(self) -> None:
+        self.fail = 0
+        self.warn = 0
+
+    def ok(self, msg: str) -> None:
+        print(f"OK: {msg}")
+
+    def warn_(self, msg: str) -> None:
+        print(f"WARN: {msg}")
+        self.warn += 1
+
+    def fail_(self, msg: str) -> None:
+        print(f"FAIL: {msg}")
+        self.fail += 1
+
+
+def deep_merge(base: dict, override: dict) -> dict:
+    out = dict(base)
+    for k, v in override.items():
+        if isinstance(v, dict) and isinstance(out.get(k), dict):
+            out[k] = deep_merge(out[k], v)
+        else:
+            out[k] = v
+    return out
+
+
+def find_root(explicit: str | None) -> Path:
+    if explicit:
+        return Path(explicit).resolve()
+    try:
+        top = subprocess.run(
+            ["git", "rev-parse", "--show-toplevel"],
+            capture_output=True, text=True, check=True,
+        ).stdout.strip()
+        if top:
+            return Path(top).resolve()
+    except Exception:
+        pass
+    return Path.cwd().resolve()
+
+
+def load_config(root: Path, explicit: str | None) -> dict:
+    path = Path(explicit) if explicit else root / ".repo-doc.json"
+    if path.is_file():
+        try:
+            user = json.loads(path.read_text(encoding="utf-8"))
+        except json.JSONDecodeError as exc:
+            print(f"FAIL: invalid config JSON in {path}: {exc}")
+            sys.exit(2)
+        cfg = deep_merge(DEFAULTS, user)
+        cfg["_config_source"] = str(path)
+    else:
+        cfg = deep_merge(DEFAULTS, {})
+        cfg["_config_source"] = "built-in defaults"
+    return cfg
+
+
+def iter_files(root: Path, ignore_dirs: list[str]):
+    ignore = set(ignore_dirs)
+    for p in root.rglob("*"):
+        if any(part in ignore for part in p.relative_to(root).parts):
+            continue
+        if p.is_file():
+            yield p
+
+
+# --------------------------------------------------------------------------- #
+# Individual checks
+# --------------------------------------------------------------------------- #
+def check_required_files(root: Path, cfg: dict, rep: Report) -> None:
+    for rel in cfg["required_files"]:
+        if (root / rel).exists():
+            rep.ok(f"required file present: {rel}")
+        else:
+            rep.fail_(f"required file missing: {rel}")
+
+
+def _strip_url(url: str) -> str:
+    url = url.strip().strip("<>").strip()
+    if " " in url and not url.startswith("./"):
+        url = url.split()[0]
+    return url.split("#", 1)[0].split("?", 1)[0].strip()
+
+
+def _is_local_ref(s: str) -> bool:
+    if not s or s.startswith(("http://", "https://", "mailto:", "#", "/", "tel:")):
+        return False
+    if any(c in s for c in "\n\r *?<>|") or " " in s:
+        return False
+    return True
+
+
+def _looks_like_repo_path(s: str) -> bool:
+    return s.startswith("./") or s.startswith(PATH_PREFIXES) or (
+        s.endswith((".md", ".py", ".sh", ".yml", ".yaml", ".json", ".sql", ".toml"))
+        and "/" not in s.strip("./")
+    ) or "/" in s
+
+
+def check_links(root: Path, cfg: dict, rep: Report) -> None:
+    lc = cfg["link_check"]
+    if not lc.get("enabled", True):
+        return
+    allow = set(lc.get("allowlist", []))
+    checked = 0
+    missing = []
+    for rel in lc["scan"]:
+        f = root / rel
+        if not f.is_file():
+            continue  # absence handled by required_files / index checks
+        text = FENCE.sub("", f.read_text(encoding="utf-8", errors="replace"))
+        refs = {_strip_url(m.group(1)) for m in MD_LINK.finditer(text)}
+        refs |= {m.group(1).strip() for m in BACKTICK.finditer(text)}
+        for ref in sorted(refs):
+            if not _is_local_ref(ref) or not _looks_like_repo_path(ref):
+                continue
+            norm = ref[2:] if ref.startswith("./") else ref
+            if ref in allow or norm in allow:
+                continue
+            checked += 1
+            cand = [(f.parent / ref), (root / norm)]
+            if not any(c.exists() for c in cand):
+                missing.append((rel, ref))
+    rep.ok(f"path/link references checked: {checked}")
+    for src, ref in missing:
+        rep.fail_(f"broken reference in {src}: {ref}")
+
+
+def check_handoff(root: Path, cfg: dict, rep: Report) -> None:
+    h = cfg["handoff"]
+    f = root / h["file"]
+    if not f.is_file():
+        if h.get("required"):
+            rep.fail_(f"required active-work tracker missing: {h['file']}")
+        else:
+            rep.ok(f"{h['file']} absent (no active work — allowed)")
+        return
+    lines = len(f.read_text(encoding="utf-8", errors="replace").splitlines())
+    if lines > h["fail_lines"]:
+        rep.fail_(f"{h['file']} has {lines} lines (> fail budget {h['fail_lines']}); archive old sessions")
+    elif lines > h["warn_lines"]:
+        rep.warn_(f"{h['file']} has {lines} lines (> target {h['warn_lines']})")
+    else:
+        rep.ok(f"{h['file']} size {lines} lines (<= {h['warn_lines']})")
+
+
+def check_index(root: Path, cfg: dict, rep: Report) -> None:
+    idx = cfg["index"]
+    f = root / idx["file"]
+    if not f.is_file():
+        if idx.get("required"):
+            rep.fail_(f"required documentation index missing: {idx['file']}")
+        else:
+            rep.ok(f"{idx['file']} absent (optional)")
+        return
+    text = f.read_text(encoding="utf-8", errors="replace")
+    for ref in idx.get("must_reference", []):
+        if ref in text:
+            rep.ok(f"index references {ref}")
+        else:
+            rep.fail_(f"index {idx['file']} must reference {ref}")
+
+
+def check_specs(root: Path, cfg: dict, rep: Report) -> None:
+    s = cfg["specs"]
+    if not s.get("enabled"):
+        return
+    active = root / s["active_dir"]
+    completed = root / s["completed_dir"]
+    scan_lines = s.get("status_scan_lines", 45)
+    status_re = re.compile(r"^(\*\*)?Status(\*\*)?\s*[:=]", re.IGNORECASE)
+    for label, d in (("active", active), ("completed", completed)):
+        if not d.is_dir():
+            if label == "active":
+                rep.warn_(f"specs enabled but {s['active_dir']} does not exist")
+            continue
+        for f in sorted(d.glob("*.md")):
+            if f.name == "README.md":
+                continue
+            head = "\n".join(f.read_text(encoding="utf-8", errors="replace").splitlines()[:scan_lines])
+            if any(status_re.match(ln) for ln in head.splitlines()):
+                rep.ok(f"{label} SPEC has Status: {f.relative_to(root)}")
+            else:
+                rep.fail_(f"{label} SPEC missing Status: line: {f.relative_to(root)}")
+
+
+def check_adapters(root: Path, cfg: dict, rep: Report) -> None:
+    a = cfg["adapters"]
+    canon = cfg["canonical_agents_file"]
+    found = []
+    for pattern in a["candidates"]:
+        for f in sorted(root.glob(pattern)):
+            if f.is_file():
+                found.append(f)
+    if not found:
+        if a.get("require_at_least_one"):
+            rep.fail_("no harness adapters found but require_at_least_one is set")
+        else:
+            rep.ok("no harness adapters present (allowed)")
+        return
+    for f in found:
+        rel = f.relative_to(root)
+        if f.is_symlink():
+            target = f.readlink().name if hasattr(f, "readlink") else Path(str(f)).resolve().name
+            if target == canon:
+                rep.ok(f"adapter {rel} -> {canon} (symlink)")
+                continue
+        text = f.read_text(encoding="utf-8", errors="replace")
+        if re.search(re.escape(canon), text):
+            rep.ok(f"adapter {rel} references {canon}")
+        else:
+            rep.fail_(f"adapter {rel} must reference the canonical {canon}")
+
+
+def check_forbidden(root: Path, cfg: dict, rep: Report) -> None:
+    patterns = cfg["forbidden_filenames"]
+    ignore = cfg["ignore_dirs"]
+    # never flag files inside a spec archive — those are historical by design.
+    archive = cfg["specs"].get("archive_dir", "")
+    hits = []
+    for f in iter_files(root, ignore):
+        rel = f.relative_to(root)
+        if archive and str(rel).startswith(archive + "/"):
+            continue
+        base = f.name
+        for pat in patterns:
+            if fnmatch.fnmatch(base.lower(), pat.lower()):
+                hits.append((str(rel), pat))
+                break
+    if hits:
+        for rel, pat in hits:
+            rep.fail_(f"forbidden/uncontrolled filename: {rel} (matches '{pat}')")
+    else:
+        rep.ok("no forbidden/uncontrolled filenames")
+
+
+def check_forbidden_terms(root: Path, cfg: dict, rep: Report) -> None:
+    terms = cfg.get("forbidden_terms", [])
+    if not terms:
+        return
+    scan = cfg["link_check"]["scan"]
+    hits = []
+    for rel in scan:
+        f = root / rel
+        if not f.is_file():
+            continue
+        text = f.read_text(encoding="utf-8", errors="replace")
+        for term in terms:
+            if term in text:
+                hits.append((rel, term))
+    if hits:
+        for rel, term in hits:
+            rep.fail_(f"stale/forbidden term '{term}' found in {rel}")
+    else:
+        rep.ok("no configured forbidden terms present")
+
+
+CHECKS = [
+    ("required-files", check_required_files),
+    ("links", check_links),
+    ("handoff-budget", check_handoff),
+    ("index", check_index),
+    ("spec-status", check_specs),
+    ("adapters", check_adapters),
+    ("forbidden-filenames", check_forbidden),
+    ("forbidden-terms", check_forbidden_terms),
+]
+
+
+def main(argv: list[str]) -> int:
+    ap = argparse.ArgumentParser(
+        prog="repo-doc-check",
+        description="Read-only documentation checks for the CP7 repository "
+                    "documentation standard. Never writes files; never uses "
+                    "the network. Exits 0 on PASS, 1 on FAIL.",
+        epilog="Example:\n"
+               "  repo-doc-check --root . \n"
+               "  repo-doc-check --config .repo-doc.json\n"
+               "  repo-doc-check --list-checks",
+        formatter_class=argparse.RawDescriptionHelpFormatter,
+    )
+    ap.add_argument("--root", help="repo root (default: git toplevel or cwd)")
+    ap.add_argument("--config", help="config JSON path (default: <root>/.repo-doc.json)")
+    ap.add_argument("--list-checks", action="store_true", help="print check names and exit")
+    ap.add_argument("--print-config", action="store_true", help="print effective config and exit")
+    args = ap.parse_args(argv)
+
+    if args.list_checks:
+        for name, _ in CHECKS:
+            print(name)
+        return 0
+
+    root = find_root(args.root)
+    cfg = load_config(root, args.config)
+
+    if args.print_config:
+        printable = {k: v for k, v in cfg.items() if not k.startswith("_")}
+        print(json.dumps(printable, indent=2))
+        return 0
+
+    if not root.is_dir():
+        print(f"FAIL: root is not a directory: {root}")
+        return 2
+
+    print(f"repo-doc-check (read-only) root={root}")
+    print(f"config: {cfg['_config_source']}")
+    print("----")
+    rep = Report()
+    for _, fn in CHECKS:
+        fn(root, cfg, rep)
+    print("----")
+    if rep.fail:
+        print(f"result: FAIL ({rep.fail} failure(s), {rep.warn} warning(s))")
+        return 1
+    print(f"result: PASS ({rep.warn} warning(s))")
+    return 0
+
+
+if __name__ == "__main__":
+    sys.exit(main(sys.argv[1:]))
