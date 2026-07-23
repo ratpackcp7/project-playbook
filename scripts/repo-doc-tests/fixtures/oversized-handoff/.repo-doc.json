@@ -1,0 +1,3 @@
+{
+  "handoff": { "file": "HANDOFF.md", "required": true, "warn_lines": 2, "fail_lines": 5 }
+}

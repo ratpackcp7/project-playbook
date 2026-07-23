@@ -1,0 +1,191 @@
+#!/usr/bin/env python3
+"""repo-doc-audit — read-only documentation inventory + semantic audit prompt.
+
+Part of the CP7 Reusable Repository Documentation Standard
+(docs/standards/repository-documentation/). This tool NEVER writes to the
+repository and NEVER uses the network.
+
+It produces two things on stdout, in Markdown:
+
+  1. A DETERMINISTIC inventory — every documentation/instruction file, the
+     canonical files present/absent, harness adapters, SPEC lifecycle state,
+     and the raw output of `repo-doc-check`. These are facts.
+
+  2. A SEMANTIC AUDIT PROMPT — the questions a human or agent must answer that
+     regex and link checks CANNOT: source-of-truth conflicts, stale-vs-current
+     classification, dangerous operational instructions, and per-file
+     disposition. These are explicitly flagged as requiring judgment.
+
+The deterministic section never claims to have resolved a semantic conflict.
+The audit is complete only after the semantic prompt is answered by a reviewer.
+
+Zero third-party dependencies — standard library only.
+"""
+from __future__ import annotations
+
+import argparse
+import subprocess
+import sys
+from pathlib import Path
+
+IGNORE = {".git", "node_modules", "venv", ".venv", "dist", "build",
+          "__pycache__", ".mypy_cache", ".pytest_cache", "vendor"}
+CANONICAL = ["README.md", "AGENTS.md", "docs/INDEX.md", "HANDOFF.md",
+             "ROADMAP.md", "CHANGELOG.md"]
+ADAPTER_GLOBS = [".cursor/rules/*.mdc", "GEMINI.md", "CLAUDE.md",
+                 ".codex/AGENTS.md", ".gemini/GEMINI.md", "opencode.json*"]
+
+
+def sh(args, cwd):
+    try:
+        return subprocess.run(args, cwd=cwd, capture_output=True,
+                              text=True).stdout.strip()
+    except Exception:
+        return ""
+
+
+def find_root(explicit):
+    if explicit:
+        return Path(explicit).resolve()
+    top = sh(["git", "rev-parse", "--show-toplevel"], Path.cwd())
+    return Path(top).resolve() if top else Path.cwd().resolve()
+
+
+def md_files(root):
+    out = []
+    for p in sorted(root.rglob("*.md")):
+        if any(part in IGNORE for part in p.relative_to(root).parts):
+            continue
+        out.append(p.relative_to(root))
+    return out
+
+
+def main(argv):
+    ap = argparse.ArgumentParser(
+        prog="repo-doc-audit",
+        description="Read-only documentation inventory + semantic audit prompt. "
+                    "Never writes files; never uses the network.",
+        epilog="Example:\n  repo-doc-audit --root . > audit-<project>-<date>.md",
+        formatter_class=argparse.RawDescriptionHelpFormatter,
+    )
+    ap.add_argument("--root", help="repo root (default: git toplevel or cwd)")
+    ap.add_argument("--check-cmd", default=None,
+                    help="path to repo-doc-check (default: sibling of this script)")
+    args = ap.parse_args(argv)
+
+    root = find_root(args.root)
+    if not root.is_dir():
+        print(f"error: not a directory: {root}", file=sys.stderr)
+        return 2
+
+    check_cmd = args.check_cmd or str(Path(__file__).resolve().parent / "repo-doc-check")
+    branch = sh(["git", "rev-parse", "--abbrev-ref", "HEAD"], root)
+    head = sh(["git", "rev-parse", "--short", "HEAD"], root)
+    dirty = sh(["git", "status", "--porcelain"], root)
+
+    docs = md_files(root)
+    present = [f for f in CANONICAL if (root / f).exists()]
+    absent = [f for f in CANONICAL if not (root / f).exists()]
+    adapters = []
+    for g in ADAPTER_GLOBS:
+        adapters += [p.relative_to(root) for p in sorted(root.glob(g)) if p.is_file()]
+
+    specs_dir = root / "docs" / "specs"
+    lifecycle = {}
+    if specs_dir.is_dir():
+        for sub in ("active", "completed", "archive"):
+            d = specs_dir / sub
+            lifecycle[sub] = sorted(p.name for p in d.glob("*.md")) if d.is_dir() else None
+        flat = sorted(p.name for p in specs_dir.glob("*.md"))
+        lifecycle["_flat"] = flat
+
+    p = print
+    p(f"# Documentation Audit — {root.name}")
+    p("")
+    p(f"- **Repo:** `{root}`")
+    p(f"- **Branch / HEAD:** `{branch}` @ `{head}`")
+    p(f"- **Working tree:** {'DIRTY' if dirty else 'clean'}")
+    p(f"- **Markdown files found:** {len(docs)}")
+    p("")
+    p("> This report has two halves. **Part 1 is deterministic fact.** "
+      "**Part 2 requires a human/agent reviewer** — the tool does not and "
+      "cannot resolve source-of-truth or staleness questions by itself.")
+    p("")
+
+    p("## Part 1 — Deterministic inventory (facts)")
+    p("")
+    p("### Canonical files")
+    p("")
+    p("| File | Present |")
+    p("|---|---|")
+    for f in CANONICAL:
+        p(f"| `{f}` | {'yes' if f in present else 'NO'} |")
+    p("")
+    p("### Harness adapters")
+    if adapters:
+        for a in adapters:
+            p(f"- `{a}`")
+    else:
+        p("- none found (harnesses read the canonical file directly, if supported)")
+    p("")
+    if lifecycle:
+        p("### SPEC lifecycle (`docs/specs/`)")
+        p("")
+        for sub in ("active", "completed", "archive"):
+            v = lifecycle.get(sub)
+            if v is None:
+                p(f"- `{sub}/`: **missing**")
+            else:
+                p(f"- `{sub}/`: {len(v)} file(s)")
+        if lifecycle.get("_flat"):
+            p(f"- flat `docs/specs/*.md`: {len(lifecycle['_flat'])} file(s) "
+              "(should be relocation stubs only)")
+        p("")
+    p("### All documentation files")
+    p("")
+    for f in docs:
+        p(f"- `{f}`")
+    p("")
+    p("### repo-doc-check output")
+    p("")
+    p("```")
+    res = subprocess.run([sys.executable, check_cmd, "--root", str(root)],
+                         capture_output=True, text=True)
+    p(res.stdout.rstrip())
+    if res.stderr.strip():
+        p(res.stderr.rstrip())
+    p(f"(exit {res.returncode})")
+    p("```")
+    p("")
+
+    p("## Part 2 — Semantic audit prompt (requires reviewer judgment)")
+    p("")
+    p("Copy this section into an audit task for an agent or answer it yourself. "
+      "None of these can be settled by the deterministic checker.")
+    p("")
+    q = [
+        "**Source-of-truth conflicts** — do any two files give conflicting "
+        "instructions (workflow, ports, deploy, data rules)? Which one is canon?",
+        "**Link/reference tracing** — beyond broken links, do references point "
+        "at the *intended* target, or a superseded doc that still exists?",
+        "**Stale vs current** — for each doc: is it current truth, historical "
+        "record, or drifted? List the ones that describe retired behavior.",
+        "**Dangerous operational instructions** — any command that could "
+        "restart a service, write live data, run a migration, or deploy, that "
+        "is not gated behind explicit human approval?",
+        "**Per-file disposition** — for every file in Part 1, recommend: keep / "
+        "update / move to archive / merge into canon / delete (with reason).",
+        "**Unknown human decisions** — list every choice that needs Chris "
+        "(retire X? canonical owner of Y? terminology rename?).",
+    ]
+    for i, item in enumerate(q, 1):
+        p(f"{i}. {item}")
+    p("")
+    p("> Reminder: this audit performs **no repository mutation**. Any changes "
+      "belong in a separate, reviewed adoption SPEC "
+      "(see `docs/standards/repository-documentation/ADOPTION.md`).")
+    return 0
+
+
+if __name__ == "__main__":
+    sys.exit(main(sys.argv[1:]))
